@@ -212,7 +212,7 @@ Resources:
         SecurityGroupIds:
           - !GetAtt InstanceSecurityGroup.GroupId
         UserData:
-          Fn::Base64: !Sub |
+          Fn::Base64: |
             #!/bin/bash
             yum update -y
             yum install -y httpd stress
@@ -248,7 +248,7 @@ Resources:
                         .then(response => response.json())
                         .then(data => {
                             document.getElementById('instance-info').textContent = 
-                                `Hello from ${data.private_ip} / ${data.instance_id}`;
+                                'Hello from ' + data.private_ip + ' / ' + data.instance_id;
                         })
                         .catch(error => {
                             console.error('Error fetching instance data:', error);
