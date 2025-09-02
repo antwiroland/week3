@@ -219,12 +219,8 @@ Resources:
             systemctl start httpd
             systemctl enable httpd
             
-            # Get instance metadata
-            INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
-            PRIVATE_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
-            
-            # Create HTML page
-            cat > /var/www/html/index.html << EOF
+            # Create HTML page with JavaScript to fetch instance metadata
+            cat > /var/www/html/index.html << 'EOF'
             <!DOCTYPE html>
             <html>
             <head>
@@ -239,18 +235,43 @@ Resources:
             </head>
             <body>
                 <div class="info">
-                    <h1>Hello from ${PRIVATE_IP} / ${INSTANCE_ID}</h1>
+                    <h1 id="instance-info">Loading instance information...</h1>
                     <p>This instance is part of an Auto Scaling Group</p>
                 </div>
                 <form action="/stress" method="post">
                     <button type="submit" class="button">Stress CPU</button>
                 </form>
+                
+                <script>
+                    // Fetch instance metadata from the metadata service
+                    fetch('/instance-data')
+                        .then(response => response.json())
+                        .then(data => {
+                            document.getElementById('instance-info').textContent = 
+                                `Hello from ${data.private_ip} / ${data.instance_id}`;
+                        })
+                        .catch(error => {
+                            console.error('Error fetching instance data:', error);
+                            document.getElementById('instance-info').textContent = 
+                                'Hello from Auto Scaling Instance';
+                        });
+                </script>
             </body>
             </html>
             EOF
             
+            # Create endpoint to serve instance metadata
+            cat > /var/www/html/instance-data << 'EOF'
+            #!/bin/bash
+            echo "Content-type: application/json"
+            echo ""
+            INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+            PRIVATE_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
+            echo "{\"instance_id\": \"$INSTANCE_ID\", \"private_ip\": \"$PRIVATE_IP\"}"
+            EOF
+            
             # Create stress endpoint
-            cat > /var/www/html/stress << EOF
+            cat > /var/www/html/stress << 'EOF'
             #!/bin/bash
             echo "Content-type: text/html"
             echo ""
@@ -263,7 +284,9 @@ Resources:
             EOF
             
             chmod +x /var/www/html/stress
+            chmod +x /var/www/html/instance-data
             chown apache:apache /var/www/html/stress
+            chown apache:apache /var/www/html/instance-data
 
   # Auto Scaling Group
   ASG:
