@@ -44,7 +44,7 @@ Parameters:
 Mappings:
   AlbHealthCheck:
     Path:
-      Value: '/'
+      Value: '/index.html'
 
 Resources:
   VPC:
@@ -242,6 +242,10 @@ Resources:
       TargetType: instance
       HealthCheckProtocol: HTTP
       HealthCheckPath: !FindInMap [AlbHealthCheck, Path, Value]
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
       Matcher:
         HttpCode: '200-399'
 
@@ -290,55 +294,101 @@ Resources:
           Arn: !GetAtt InstanceProfile.Arn
         SecurityGroupIds:
           - !Ref AppSG
-        UserData: !Base64 |
-          #!/bin/bash
-          set -xe
-          # Update and install Apache + stress tool (Amazon Linux 2)
-          yum update -y
-          amazon-linux-extras install epel -y || true
-          yum install -y httpd stress
-          systemctl enable httpd
-          systemctl start httpd
+        UserData: 
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -xe
+            # Update and install Apache + stress tool (Amazon Linux 2)
+            yum update -y
+            amazon-linux-extras install epel -y
+            yum install -y httpd stress
+            systemctl enable httpd
+            systemctl start httpd
 
-          # Enable CGI and create a stress endpoint
-          sed -i 's/^#AddHandler cgi-script .cgi .pl/AddHandler cgi-script .cgi .pl .sh/g' /etc/httpd/conf.modules.d/00-base.conf || true
-          echo "<Directory \"/var/www/cgi-bin\">\n    AllowOverride None\n    Options +ExecCGI\n    Require all granted\n</Directory>" > /etc/httpd/conf.d/cgi.conf
-          mkdir -p /var/www/cgi-bin
+            # Create CGI directory and script
+            mkdir -p /var/www/cgi-bin
+            cat > /var/www/cgi-bin/stress.sh << 'EOF'
+            #!/bin/bash
+            echo "Content-type: text/plain"
+            echo ""
+            # Run CPU stress for 2 minutes in background using all vCPUs
+            CPUS=$(nproc)
+            /usr/bin/stress --cpu $CPUS --timeout 120 &
+            echo "OK: started stress for 120s on $CPUS CPUs"
+            EOF
+            chmod +x /var/www/cgi-bin/stress.sh
 
-          cat >/var/www/cgi-bin/stress.sh <<'EOF'
-          #!/bin/bash
-          echo "Content-type: text/plain"
-          echo
-          # Run CPU stress for 2 minutes in background using all vCPUs
-          CPUS=$(nproc)
-          /usr/bin/stress --cpu "$CPUS" --timeout 120 &
-          echo "OK: started stress for 120s on $CPUS CPUs"
-          EOF
-          chmod +x /var/www/cgi-bin/stress.sh
+            # Enable CGI in Apache
+            cat > /etc/httpd/conf.d/cgi.conf << 'EOF'
+            <Directory "/var/www/cgi-bin">
+                AllowOverride None
+                Options +ExecCGI
+                AddHandler cgi-script .cgi .pl .sh
+                Require all granted
+            </Directory>
+            EOF
 
-          # Render index.html with instance metadata
-          META_URL=http://169.254.169.254/latest/meta-data
-          IP=$(curl -s $META_URL/local-ipv4)
-          IID=$(curl -s $META_URL/instance-id)
-          cat >/var/www/html/index.html <<EOF
-          <!doctype html>
-          <html><head><meta charset="utf-8"/>
-          <title>Auto Scaling Lab</title>
-          <style>body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:40px}button{padding:12px 18px;border:0;border-radius:10px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.1)}.ok{color:#0a0}</style>
-          </head><body>
-          <h1>Hello from <span class="ok">$IP</span> / <span class="ok">$IID</span></h1>
-          <p>Behind an Application Load Balancer. Click the button below to stress CPU on <b>this</b> instance (120s).</p>
-          <button onclick="stress()">Start CPU Stress</button>
-          <pre id="out"></pre>
-          <script>
-            async function stress(){
-              const r = await fetch('/cgi-bin/stress.sh');
-              document.getElementById('out').textContent = await r.text();
-            }
-          </script>
-          </body></html>
-          EOF
-          systemctl restart httpd
+            # Render index.html with instance metadata
+            META_URL=http://169.254.169.254/latest/meta-data
+            IP=$(curl -s $META_URL/local-ipv4)
+            IID=$(curl -s $META_URL/instance-id)
+            cat > /var/www/html/index.html << EOF
+            <!doctype html>
+            <html>
+            <head>
+                <meta charset="utf-8"/>
+                <title>Auto Scaling Lab</title>
+                <style>
+                    body {
+                        font-family: system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+                        margin: 40px;
+                        text-align: center;
+                    }
+                    button {
+                        padding: 12px 18px;
+                        border: 0;
+                        border-radius: 10px;
+                        cursor: pointer;
+                        box-shadow: 0 2px 8px rgba(0,0,0,.1);
+                        background-color: #4CAF50;
+                        color: white;
+                        font-size: 16px;
+                    }
+                    .ok {
+                        color: #0a0;
+                        font-weight: bold;
+                    }
+                    pre {
+                        background-color: #f4f4f4;
+                        padding: 10px;
+                        border-radius: 5px;
+                        margin-top: 20px;
+                    }
+                </style>
+            </head>
+            <body>
+                <h1>Hello from <span class="ok">$IP</span> / <span class="ok">$IID</span></h1>
+                <p>Behind an Application Load Balancer. Click the button below to stress CPU on <b>this</b> instance (120s).</p>
+                <button onclick="stress()">Start CPU Stress</button>
+                <pre id="out"></pre>
+                <script>
+                    async function stress() {
+                        const out = document.getElementById('out');
+                        out.textContent = 'Starting CPU stress...';
+                        try {
+                            const response = await fetch('/cgi-bin/stress.sh');
+                            const text = await response.text();
+                            out.textContent = text;
+                        } catch (error) {
+                            out.textContent = 'Error: ' + error.message;
+                        }
+                    }
+                </script>
+            </body>
+            </html>
+            EOF
+
+            systemctl restart httpd
 
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
@@ -354,8 +404,8 @@ Resources:
       MaxSize: !Ref MaxCapacity
       TargetGroupARNs:
         - !Ref TargetGroup
-      HealthCheckType: EC2
-      HealthCheckGracePeriod: 60
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
       Tags:
         - Key: Name
           Value: !Sub '${ProjectName}-app'
@@ -382,4 +432,3 @@ Outputs:
     Value: !Ref AutoScalingGroup
   VpcId:
     Value: !Ref VPC
-
