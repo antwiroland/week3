@@ -2,17 +2,27 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: Auto Scaling Lab with Apache Web Server
 
 Parameters:
-  KeyName:
-    Description: Name of an existing EC2 KeyPair to enable SSH access
-    Type: AWS::EC2::KeyPair::KeyName
-    ConstraintDescription: Must be the name of an existing EC2 KeyPair
+  VpcCidr:
+    Description: CIDR block for the VPC
+    Type: String
+    Default: 10.0.0.0/16
+  
+  PublicSubnetCidr:
+    Description: CIDR block for the public subnet
+    Type: String
+    Default: 10.0.1.0/24
+  
+  PrivateSubnetCidr:
+    Description: CIDR block for the private subnet
+    Type: String
+    Default: 10.0.2.0/24
 
 Resources:
   # VPC
   VPC:
     Type: AWS::EC2::VPC
     Properties:
-      CidrBlock: 10.0.0.0/16
+      CidrBlock: !Ref VpcCidr
       EnableDnsSupport: true
       EnableDnsHostnames: true
       Tags:
@@ -39,7 +49,7 @@ Resources:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: 10.0.1.0/24
+      CidrBlock: !Ref PublicSubnetCidr
       AvailabilityZone: !Select [0, !GetAZs '']
       MapPublicIpOnLaunch: true
       Tags:
@@ -51,7 +61,7 @@ Resources:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: 10.0.2.0/24
+      CidrBlock: !Ref PrivateSubnetCidr
       AvailabilityZone: !Select [0, !GetAZs '']
       Tags:
         - Key: Name
@@ -69,6 +79,7 @@ Resources:
   # Public Route
   PublicRoute:
     Type: AWS::EC2::Route
+    DependsOn: AttachGateway
     Properties:
       RouteTableId: !Ref PublicRouteTable
       DestinationCidrBlock: 0.0.0.0/0
@@ -81,6 +92,20 @@ Resources:
       SubnetId: !Ref PublicSubnet
       RouteTableId: !Ref PublicRouteTable
 
+  # NAT Gateway in Public Subnet
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+    DependsOn: AttachGateway
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+    DependsOn: PublicSubnetRouteTableAssociation
+
   # Private Route Table
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
@@ -89,6 +114,15 @@ Resources:
       Tags:
         - Key: Name
           Value: AutoScalingLabPrivateRT
+
+  # Private Route to NAT Gateway
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+    DependsOn: NatGateway
 
   # Associate Private Subnet with Private Route Table
   PrivateSubnetRouteTableAssociation:
@@ -175,7 +209,6 @@ Resources:
       LaunchTemplateData:
         ImageId: ami-0c02fb55956c7d316  # Amazon Linux 2 AMI ID
         InstanceType: t2.micro
-        KeyName: !Ref KeyName
         SecurityGroupIds:
           - !GetAtt InstanceSecurityGroup.GroupId
         UserData:
